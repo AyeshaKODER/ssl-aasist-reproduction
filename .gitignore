@@ -1,0 +1,26 @@
+# Data (get from asvspoof.org)
+data/
+*.flac
+*.wav
+
+# Checkpoints and run artifacts (too large for normal git; use Releases/LFS if needed)
+runs/
+*.pt
+*.pth
+*.ckpt
+
+# HuggingFace / torch caches
+.cache/
+~/.cache/huggingface/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.egg-info/
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
