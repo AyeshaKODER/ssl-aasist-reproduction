@@ -10,6 +10,11 @@ Training loop, Section 6.3 (paper-exact hyperparameters):
 
   Section 6.3: "It is performed using a weighted cross entropy objective
   function to minimize the training loss."
+
+--resume added on top of the paper spec: lets a run pick back up from its
+last saved epoch instead of restarting at 0, since free Colab sessions can
+disconnect mid-run and wipe the local VM (checkpoints in Drive survive that,
+but without --resume you'd still have to retrain from scratch).
 """
 import argparse
 import os
@@ -37,7 +42,6 @@ def get_class_weights(dataset, device):
     n_bonafide = sum(labels)
     n_spoof = len(labels) - n_bonafide
     total = len(labels)
-    # inverse-frequency weighting -> "weighted cross entropy" (Section 6.3)
     w_spoof = total / (2 * max(n_spoof, 1))
     w_bonafide = total / (2 * max(n_bonafide, 1))
     return torch.tensor([w_spoof, w_bonafide], dtype=torch.float32, device=device)
@@ -55,18 +59,19 @@ def main():
     ap.add_argument("--dev_protocol",
                      default="data/LA/ASVspoof2019_LA_cm_protocols/ASVspoof2019.LA.cm.dev.trl.txt")
     ap.add_argument("--dev_dir", default="data/LA/ASVspoof2019_LA_dev/flac")
-    ap.add_argument("--epochs", type=int, default=100)  # Section 6.3
+    ap.add_argument("--epochs", type=int, default=100)
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--batch_size", type=int, default=None,
-                     help="Defaults per-config: 14 for wav2vec2 (Section 6.3), 32 for sinc")
-    ap.add_argument("--lr", type=float, default=None,
-                     help="Defaults per-config: 1e-6 wav2vec2 / 1e-4 sinc (Section 6.3)")
+    ap.add_argument("--batch_size", type=int, default=None)
+    ap.add_argument("--lr", type=float, default=None)
     ap.add_argument("--fp16", action="store_true")
-    ap.add_argument("--subset_frac", type=float, default=1.0,
-                     help="Run on a fraction of the data first, to validate the pipeline cheaply")
+    ap.add_argument("--subset_frac", type=float, default=1.0)
     ap.add_argument("--out_dir", default="runs")
     ap.add_argument("--num_workers", type=int, default=2)
-    ap.add_argument("--save_optimizer", action="store_true")
+    ap.add_argument("--resume", default=None,
+                     help="Path to a last.pt/best.pt to resume from — picks up "
+                          "at that checkpoint's saved epoch instead of epoch 0, "
+                          "with optimizer state restored so training continues "
+                          "smoothly rather than restarting momentum from scratch.")
     args = ap.parse_args()
 
     set_seed(args.seed)
@@ -76,8 +81,8 @@ def main():
     model.to(device)
 
     is_wav2vec = "wav2vec" in args.config
-    lr = args.lr or (1e-6 if is_wav2vec else 1e-4)  # Section 6.3
-    batch_size = args.batch_size or (14 if is_wav2vec else 32)  # Sec 6.3: batch 14 for SSL
+    lr = args.lr or (1e-6 if is_wav2vec else 1e-4)
+    batch_size = args.batch_size or (14 if is_wav2vec else 32)
 
     rawboost_fn = RAWBOOST_CONFIGS.get(da_key) if da_key else None
 
@@ -95,14 +100,28 @@ def main():
 
     class_weights = get_class_weights(train_ds, device)
     criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)  # Section 6.3: Adam
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scaler = torch.amp.GradScaler('cuda', enabled=args.fp16)
 
     run_dir = os.path.join(args.out_dir, args.config, f"seed{args.seed}")
     os.makedirs(run_dir, exist_ok=True)
 
+    start_epoch = 0
     best_dev_loss = float("inf")
-    for epoch in range(args.epochs):
+
+    if args.resume and os.path.exists(args.resume):
+        print(f"Resuming from {args.resume}")
+        ckpt = torch.load(args.resume, map_location=device)
+        model.load_state_dict(ckpt["model_state"], strict=False)
+        if "optimizer_state" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state"])
+        start_epoch = ckpt.get("epoch", -1) + 1  # resume AFTER the saved epoch
+        best_dev_loss = ckpt.get("best_dev_loss", float("inf"))
+        print(f"  resuming at epoch {start_epoch}, best_dev_loss so far: {best_dev_loss:.4f}")
+    elif args.resume:
+        print(f"WARNING: --resume path {args.resume} not found, starting from epoch 0 instead")
+
+    for epoch in range(start_epoch, args.epochs):
         model.train()
         total_loss = 0.0
         pbar = tqdm(train_loader, desc=f"[{args.config} seed{args.seed}] epoch {epoch+1}/{args.epochs}")
@@ -118,7 +137,6 @@ def main():
             total_loss += loss.item()
             pbar.set_postfix(loss=total_loss / (pbar.n + 1))
 
-        # Validation
         model.eval()
         dev_loss = 0.0
         with torch.no_grad():
@@ -129,9 +147,15 @@ def main():
         dev_loss /= max(1, len(dev_loader))
         print(f"epoch {epoch+1}: train_loss={total_loss/len(train_loader):.4f} dev_loss={dev_loss:.4f}")
 
-        ckpt = {"model_state": model.state_dict(), "epoch": epoch, "config": args.config}
-        if args.save_optimizer:
-            ckpt["optimizer_state"] = optimizer.state_dict()
+        # Optimizer state now always saved — needed for --resume to continue
+        # cleanly rather than restarting Adam's momentum from scratch.
+        ckpt = {
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "epoch": epoch,
+            "config": args.config,
+            "best_dev_loss": min(best_dev_loss, dev_loss),
+        }
         torch.save(ckpt, os.path.join(run_dir, "last.pt"))
         if dev_loss < best_dev_loss:
             best_dev_loss = dev_loss
