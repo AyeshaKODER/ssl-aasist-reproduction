@@ -1,3 +1,10 @@
+"""
+Gradio app for Hugging Face Spaces (ZeroGPU hardware). `import spaces` must
+be the very first import, before torch or anything CUDA-related — ZeroGPU
+manages CUDA setup itself and breaks if something else touches it first.
+"""
+import spaces  # must be first, before torch/torchaudio
+
 import os
 import sys
 
@@ -13,12 +20,13 @@ from data.dataset import _pad_or_crop, SEGMENT_SAMPLES
 
 CONFIG_NAME = os.environ.get("MODEL_CONFIG", "sinc_no_sa_no_da")
 CHECKPOINT_PATH = os.environ.get("CHECKPOINT_PATH", "checkpoints/best.pt")
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# Load on CPU at startup — ZeroGPU only attaches a real GPU inside functions
+# decorated with @spaces.GPU, not at module import time.
 MODEL, _ = build_model(CONFIG_NAME)
 
 if os.path.exists(CHECKPOINT_PATH):
-    ckpt = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+    ckpt = torch.load(CHECKPOINT_PATH, map_location="cpu")
     MODEL.load_state_dict(ckpt["model_state"], strict=False)
     CHECKPOINT_STATUS = f"checkpoint loaded: {CHECKPOINT_PATH}"
 else:
@@ -26,13 +34,16 @@ else:
                           " — running with random, UNTRAINED weights. "
                           "Upload best.pt via the Space's Files tab.")
 
-MODEL.to(DEVICE)
 MODEL.eval()
 
 
+@spaces.GPU
 def predict(audio_path, threshold):
     if audio_path is None:
         return "No audio provided", None, ""
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = MODEL.to(device)
 
     data, sr = sf.read(audio_path, dtype="float32")
     wav = torch.from_numpy(data)
@@ -41,10 +52,10 @@ def predict(audio_path, threshold):
         wav = wav.mean(dim=0, keepdim=True)
     if sr != 16000:
         wav = torchaudio.functional.resample(wav, sr, 16000)
-    wav = _pad_or_crop(wav, target_len=SEGMENT_SAMPLES, train=False).to(DEVICE)
+    wav = _pad_or_crop(wav, target_len=SEGMENT_SAMPLES, train=False).to(device)
 
     with torch.no_grad():
-        logits = MODEL(wav)
+        logits = model(wav)
         probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
         raw_score = float(logits[0, 1] - logits[0, 0])
 
@@ -62,28 +73,13 @@ def predict(audio_path, threshold):
     return verdict, score_breakdown, detail
 
 
-CUSTOM_CSS = """
-.gradio-container { background: #0B0D10 !important; font-family: 'Space Grotesk', sans-serif !important; }
-h1, h2, h3 { font-family: 'Space Grotesk', sans-serif !important; }
-.block { background: #14171B !important; border-color: #262B31 !important; }
-label, .label-wrap span { color: #9AA2AB !important; font-size: 12px !important; }
-textarea, input[type=text] { font-family: 'JetBrains Mono', monospace !important; color: #E6E8EA !important; }
-button.primary { background: #33D6B0 !important; color: #0B0D10 !important; border: none !important; font-weight: 600 !important; }
-footer { display: none !important; }
-"""
-
-THEME = gr.themes.Base(
-    font=[gr.themes.GoogleFont("Space Grotesk"), "sans-serif"],
-    font_mono=[gr.themes.GoogleFont("JetBrains Mono"), "monospace"],
-)
-
-with gr.Blocks(title="Voiceprint — impersonation risk console", theme=THEME, css=CUSTOM_CSS) as demo:
+with gr.Blocks(title="Voiceprint — impersonation risk console") as demo:
     gr.Markdown(
         "# Voiceprint\n"
         "Voice-clone / impersonation risk console — reproduction of "
         "*\"Automatic speaker verification spoofing and deepfake detection "
         "using wav2vec 2.0 and data augmentation\"* (Tak et al., Odyssey 2022). "
-        "Source: [GitHub repo](https://github.com/YOUR_USERNAME/YOUR_REPO)."
+        "Source: [GitHub repo](https://github.com/AyeshaKODER/ssl-aasist-reproduction.git)."
     )
     with gr.Row():
         with gr.Column():

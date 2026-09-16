@@ -14,8 +14,10 @@ A countermeasure system (bona fide vs. spoofed speech) combining a wav2vec 2.0
 XLS-R (0.3B) front-end with an AASIST graph-attention backend, trained and
 evaluated on ASVspoof2019/2021.
 
-**Demo:** [huggingface.co/spaces/YOUR_USERNAME/voiceprint](https://huggingface.co/spaces/YOUR_USERNAME/voiceprint)
+**Demo:** [voiceprint](https://huggingface.co/spaces/eyeeeeshe/voiceprint)
+
 **Paper:** [arXiv:2202.12233](https://arxiv.org/abs/2202.12233)
+
 **Official authors' repo:** [TakHemlata/SSL_Anti-spoofing](https://github.com/TakHemlata/SSL_Anti-spoofing)
 
 ## Architecture

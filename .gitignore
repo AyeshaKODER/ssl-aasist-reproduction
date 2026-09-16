@@ -1,5 +1,5 @@
 # Data (get from asvspoof.org)
-data/
+/data/
 *.flac
 *.wav
 
